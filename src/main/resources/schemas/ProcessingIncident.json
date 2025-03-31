@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "ProcessingIncident",
+  "description": "Schema for processing incidents during file processing",
+  "properties": {
+    "incidentId": {
+      "type": "string",
+      "description": "Unique identifier for the incident"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Time when the incident occurred"
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["INFO", "WARNING", "ERROR", "CRITICAL"],
+      "description": "Severity level of the incident"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["IO_ERROR", "VALIDATION_ERROR", "TRANSFORMATION_ERROR", "BUSINESS_LOGIC_ERROR", "KAFKA_ERROR"],
+      "description": "Type of the incident"
+    },
+    "message": {
+      "type": "string",
+      "description": "Descriptive message about the incident"
+    },
+    "details": {
+      "type": "object",
+      "description": "Detailed information about the incident",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Name of the file being processed"
+        },
+        "fileType": {
+          "type": "string",
+          "enum": ["EXTERNAL", "ISIN", "INTERNAL"],
+          "description": "Type of the file being processed"
+        },
+        "errorLocation": {
+          "type": "string",
+          "description": "Where the error occurred (e.g., line number, field)"
+        },
+        "exception": {
+          "type": "string",
+          "description": "Exception details if available"
+        }
+      },
+      "required": ["filename", "fileType"]
+    },
+    "correlationId": {
+      "type": "string",
+      "description": "ID to correlate incidents with processing batches"
+    },
+    "resolution": {
+      "type": "object",
+      "description": "Information about resolution steps",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["MOVED_TO_ERROR", "RETRY", "IGNORED", "MANUAL_INTERVENTION_REQUIRED"],
+          "description": "Action taken to resolve the incident"
+        },
+        "errorFilePath": {
+          "type": "string",
+          "description": "Path where the error file was moved if applicable"
+        },
+        "retryCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of retry attempts if applicable"
+        }
+      },
+      "required": ["action"]
+    }
+  },
+  "required": ["incidentId", "timestamp", "severity", "type", "message", "details", "correlationId"]
+}

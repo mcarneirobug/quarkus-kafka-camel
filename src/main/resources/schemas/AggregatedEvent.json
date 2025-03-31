@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "AggregatedEvent",
+  "description": "Schema for the aggregated event from multiple CSV files",
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "description": "Unique identifier for the event"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Time when the event was processed"
+    },
+    "externalData": {
+      "type": "object",
+      "description": "Data from the external file",
+      "properties": {
+        "externalId": {
+          "type": "string",
+          "description": "External identifier"
+        },
+        "externalName": {
+          "type": "string",
+          "description": "External name"
+        },
+        "externalValue": {
+          "type": "number",
+          "description": "External value"
+        }
+      },
+      "required": ["externalId", "externalName", "externalValue"]
+    },
+    "isinData": {
+      "type": "object",
+      "description": "Data from the ISIN file",
+      "properties": {
+        "isin": {
+          "type": "string",
+          "description": "ISIN code"
+        },
+        "isinDescription": {
+          "type": "string",
+          "description": "ISIN description"
+        },
+        "isinCategory": {
+          "type": "string",
+          "description": "ISIN category"
+        }
+      },
+      "required": ["isin", "isinDescription", "isinCategory"]
+    },
+    "internalData": {
+      "type": "object",
+      "description": "Data from the internal file",
+      "properties": {
+        "internalId": {
+          "type": "string",
+          "description": "Internal identifier"
+        },
+        "internalCode": {
+          "type": "string",
+          "description": "Internal code"
+        },
+        "internalAmount": {
+          "type": "number",
+          "description": "Internal amount"
+        }
+      },
+      "required": ["internalId", "internalCode", "internalAmount"]
+    },
+    "correlationId": {
+      "type": "string",
+      "description": "ID used to correlate records from different files"
+    },
+    "processingInfo": {
+      "type": "object",
+      "description": "Meta information about the processing",
+      "properties": {
+        "processedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Time of processing"
+        },
+        "sourceBatch": {
+          "type": "string",
+          "description": "Identifier of the source batch"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["COMPLETE", "PARTIAL"],
+          "description": "Status of the aggregated event"
+        }
+      },
+      "required": ["processedAt", "sourceBatch", "status"]
+    }
+  },
+  "required": ["eventId", "timestamp", "correlationId", "processingInfo"]
+}

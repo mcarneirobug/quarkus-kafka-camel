@@ -1,0 +1,55 @@
+#quarkus:
+#  kafka:
+#    bootstrap-servers: localhost:9092
+#  devservices:
+#    enabled: false
+#
+#camel:
+#  context:
+#    name: CsvToKafkaProcessor
+#
+#  # Error handling configuration
+#  error-handler:
+#    dead-letter-channel:
+#      enabled: true
+#      deadLetterUri: "file:./errors"
+#      redeliveryPolicy:
+#        maximumRedeliveries: 3
+#        redeliveryDelay: 1000
+#        backOffMultiplier: 2
+#        useExponentialBackOff: true
+#        logRetryAttempted: true
+#
+#  # Component configurations
+#  component:
+#    kafka:
+#      brokers: ${quarkus.kafka.bootstrap-servers}
+#      client-id: csv-processor-client
+#      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+#
+#  # Main service configuration
+#  service:
+#    enabled: true
+#
+## Application specific configuration
+#app:
+#  input:
+#    directory: "./input"
+#    processed-directory: "./processed"
+#    error-directory: "./errors"
+#    file-patterns:
+#      external: "ESH_EXTERNAL.*\\.csv"
+#      isin: "ESH_ISIN.*\\.csv"
+#      internal: "ESH_INTERNAL.*\\.csv"
+#
+#  output:
+#    kafka:
+#      topic: "aggregated-events"
+#      batch-size: 100
+#
+#  monitoring:
+#    incident-topic: "file-processing-incidents"
+#
+#  # Specify whether to use Camel Kafka component or SmallRye Reactive Messaging
+#  kafka-mode: "camel" # Options: "camel" or "emitter"
