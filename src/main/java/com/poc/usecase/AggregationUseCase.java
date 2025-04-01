@@ -15,12 +15,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * UseCase para agregar os dados dos três tipos de arquivos
+ * UseCase for aggregating data from the three file types
  */
 @ApplicationScoped
 public class AggregationUseCase {
 
     private static final Logger LOG = Logger.getLogger(AggregationUseCase.class);
+    private static final String ESH_PREFIX = "ESH_";
 
     @Inject
     ObjectMapper objectMapper;
@@ -28,75 +29,100 @@ public class AggregationUseCase {
     @Inject
     MonitoringUseCase monitoringUseCase;
 
-    // Armazenamento dos registros por tipo
+    // Record storage by type
     private final Map<String, List<ExternalCsvRecord>> externalRecords = new ConcurrentHashMap<>();
     private final Map<String, List<IsinCsvRecord>> isinRecords = new ConcurrentHashMap<>();
     private final Map<String, List<InternalCsvRecord>> internalRecords = new ConcurrentHashMap<>();
 
     /**
-     * Armazena registros de um arquivo externo para correlação posterior
+     * Standardizes the correlation ID to ensure consistent format
+     * Removes "ESH_" prefix if present
+     */
+    private String standardizeCorrelationId(String correlationId) {
+        if (correlationId == null) {
+            LOG.warn("Null correlationId provided to standardization method");
+            return null;
+        }
+
+        String standardized = correlationId;
+        if (standardized.startsWith(ESH_PREFIX)) {
+            standardized = standardized.substring(ESH_PREFIX.length());
+            LOG.debugf("Standardized correlationId from %s to %s", correlationId, standardized);
+        }
+
+        return standardized;
+    }
+
+    /**
+     * Stores external file records for later correlation
      */
     public void addExternalBatch(List<ExternalCsvRecord> records, String correlationId) {
-        LOG.infof("Adicionando lote de registros externos: count=%d, correlationId=%s",
-                records.size(), correlationId);
-        externalRecords.put(correlationId, records);
+        String standardId = standardizeCorrelationId(correlationId);
+        LOG.infof("Adding external records batch: count=%d, correlationId=%s",
+                records.size(), standardId);
+        externalRecords.put(standardId, records);
     }
 
     /**
-     * Armazena registros de um arquivo ISIN para correlação posterior
+     * Stores ISIN file records for later correlation
      */
     public void addIsinBatch(List<IsinCsvRecord> records, String correlationId) {
-        LOG.infof("Adicionando lote de registros ISIN: count=%d, correlationId=%s",
-                records.size(), correlationId);
-        isinRecords.put(correlationId, records);
+        String standardId = standardizeCorrelationId(correlationId);
+        LOG.infof("Adding ISIN records batch: count=%d, correlationId=%s",
+                records.size(), standardId);
+        isinRecords.put(standardId, records);
     }
 
     /**
-     * Armazena registros de um arquivo interno para correlação posterior
+     * Stores internal file records for later correlation
      */
     public void addInternalBatch(List<InternalCsvRecord> records, String correlationId) {
-        LOG.infof("Adicionando lote de registros internos: count=%d, correlationId=%s",
-                records.size(), correlationId);
-        internalRecords.put(correlationId, records);
+        String standardId = standardizeCorrelationId(correlationId);
+        LOG.infof("Adding internal records batch: count=%d, correlationId=%s",
+                records.size(), standardId);
+        internalRecords.put(standardId, records);
     }
 
     /**
-     * Verifica se todos os tipos de arquivos foram recebidos para um correlationId
+     * Checks if all types of files have been received for a correlationId
      */
     public boolean isReadyForAggregation(String correlationId) {
-        boolean hasExternal = !externalRecords.isEmpty() && externalRecords.containsKey(correlationId);
-        boolean hasIsin = !isinRecords.isEmpty() && isinRecords.containsKey(correlationId);
-        boolean hasInternal = !internalRecords.isEmpty() && internalRecords.containsKey(correlationId);
+        String standardId = standardizeCorrelationId(correlationId);
+
+        boolean hasExternal = !externalRecords.isEmpty() && externalRecords.containsKey(standardId);
+        boolean hasIsin = !isinRecords.isEmpty() && isinRecords.containsKey(standardId);
+        boolean hasInternal = !internalRecords.isEmpty() && internalRecords.containsKey(standardId);
 
         boolean isReady = hasExternal && hasIsin && hasInternal;
 
-        LOG.infof("Verificando agregação para o lote %s: external=%s, isin=%s, internal=%s, isReady=%s",
-                correlationId, hasExternal, hasIsin, hasInternal, isReady);
+        LOG.infof("Checking aggregation for batch %s: external=%s, isin=%s, internal=%s, isReady=%s",
+                standardId, hasExternal, hasIsin, hasInternal, isReady);
 
         return isReady;
     }
 
     /**
-     * Agrega os registros com base na chave de correlação entre registros
+     * Aggregates records based on the correlation key between records
      */
     public List<AggregatedEvent> aggregateEvents(String batchCorrelationId) {
-        LOG.infof("Iniciando agregação para o lote: %s", batchCorrelationId);
+        String standardId = standardizeCorrelationId(batchCorrelationId);
+        LOG.infof("Starting aggregation for batch: %s", standardId);
 
-        if (!isReadyForAggregation(batchCorrelationId)) {
+        if (!isReadyForAggregation(standardId)) {
             ProcessingIncident incident = monitoringUseCase.createIncident(
                     "N/A", "AGGREGATION",
-                    "Tentativa de agregação sem todos os arquivos necessários",
-                    "AggregationUseCase", null, batchCorrelationId, "MANUAL_INTERVENTION_REQUIRED");
+                    "Attempted aggregation without all necessary files",
+                    "AggregationUseCase", null, standardId, "MANUAL_INTERVENTION_REQUIRED");
 
             throw new BusinessLogicException(
-                    "Não é possível agregar eventos sem todos os tipos de arquivos", incident);
+                    "Cannot aggregate events without all file types", incident);
         }
 
-        List<ExternalCsvRecord> externalBatch = externalRecords.get(batchCorrelationId);
-        List<IsinCsvRecord> isinBatch = isinRecords.get(batchCorrelationId);
-        List<InternalCsvRecord> internalBatch = internalRecords.get(batchCorrelationId);
+        List<ExternalCsvRecord> externalBatch = externalRecords.get(standardId);
+        List<IsinCsvRecord> isinBatch = isinRecords.get(standardId);
+        List<InternalCsvRecord> internalBatch = internalRecords.get(standardId);
 
-        // Mapeamento dos registros por chave de correlação
+        // Map records by correlation key
         Map<String, ExternalCsvRecord> externalMap = externalBatch.stream()
                 .collect(Collectors.toMap(ExternalCsvRecord::getCorrelationKey, r -> r, (r1, r2) -> r1));
 
@@ -106,7 +132,7 @@ public class AggregationUseCase {
         Map<String, InternalCsvRecord> internalMap = internalBatch.stream()
                 .collect(Collectors.toMap(InternalCsvRecord::getCorrelationKey, r -> r, (r1, r2) -> r1));
 
-        // Construir conjunto único de chaves de correlação
+        // Build unique set of correlation keys
         Set<String> allKeys = new HashSet<>();
         allKeys.addAll(externalMap.keySet());
         allKeys.addAll(isinMap.keySet());
@@ -122,12 +148,12 @@ public class AggregationUseCase {
                 event.setTimestamp(new Date());
                 event.setCorrelationId(key);
 
-                // Dados de processamento
+                // Processing information
                 ProcessingInfo processingInfo = new ProcessingInfo();
                 processingInfo.setProcessedAt(new Date());
-                processingInfo.setSourceBatch(batchCorrelationId);
+                processingInfo.setSourceBatch(standardId);
 
-                // Determinar se é completo ou parcial
+                // Determine if complete or partial
                 boolean hasAllData = externalMap.containsKey(key) &&
                         isinMap.containsKey(key) &&
                         internalMap.containsKey(key);
@@ -137,7 +163,7 @@ public class AggregationUseCase {
                         ProcessingInfo.Status.PARTIAL);
                 event.setProcessingInfo(processingInfo);
 
-                // Adicionar dados externos se disponíveis
+                // Add external data if available
                 if (externalMap.containsKey(key)) {
                     ExternalCsvRecord externalRecord = externalMap.get(key);
                     ExternalData externalData = new ExternalData();
@@ -147,7 +173,7 @@ public class AggregationUseCase {
                     event.setExternalData(externalData);
                 }
 
-                // Adicionar dados ISIN se disponíveis
+                // Add ISIN data if available
                 if (isinMap.containsKey(key)) {
                     IsinCsvRecord isinRecord = isinMap.get(key);
                     IsinData isinData = new IsinData();
@@ -157,7 +183,7 @@ public class AggregationUseCase {
                     event.setIsinData(isinData);
                 }
 
-                // Adicionar dados internos se disponíveis
+                // Add internal data if available
                 if (internalMap.containsKey(key)) {
                     InternalCsvRecord internalRecord = internalMap.get(key);
                     InternalData internalData = new InternalData();
@@ -169,49 +195,50 @@ public class AggregationUseCase {
 
                 aggregatedEvents.add(event);
             } catch (Exception e) {
-                LOG.errorf("Erro ao agregar evento para a chave %s: %s", key, e.getMessage());
+                LOG.errorf("Error aggregating event for key %s: %s", key, e.getMessage());
                 ProcessingIncident incident = monitoringUseCase.createIncident(
                         "N/A", "AGGREGATION",
-                        "Erro ao agregar evento para chave: " + key,
-                        "AggregationUseCase", e, batchCorrelationId, "MANUAL_INTERVENTION_REQUIRED");
+                        "Error aggregating event for key: " + key,
+                        "AggregationUseCase", e, standardId, "MANUAL_INTERVENTION_REQUIRED");
 
                 monitoringUseCase.registerIncident(incident);
                 errors.add(e);
             }
         }
 
-        // verifica se houve errors
+        // Check for errors
         if (!errors.isEmpty()) {
-            // Se houve erros, criar um incidente e não retornar nada
+            // If there were errors, create an incident and don't return anything
             ProcessingIncident incident = monitoringUseCase.createIncident(
                     "N/A", "AGGREGATION",
-                    "Erros durante a agregação de dados. Total de erros: " + errors.size(),
-                    "AggregationUseCase", errors.getFirst(), batchCorrelationId, "MANUAL_INTERVENTION_REQUIRED");
+                    "Errors during data aggregation. Total errors: " + errors.size(),
+                    "AggregationUseCase", errors.get(0), standardId, "MANUAL_INTERVENTION_REQUIRED");
 
             throw new BusinessLogicException(
-                    "Erros durante a agregação de dados", errors.getFirst(), incident);
+                    "Errors during data aggregation", errors.get(0), incident);
         }
 
-        LOG.infof("Agregação concluída: lote=%s, eventos=%d", batchCorrelationId, aggregatedEvents.size());
+        LOG.infof("Aggregation complete: batch=%s, events=%d", standardId, aggregatedEvents.size());
 
-        // Limpar dados de memória após a agregação
-        cleanupBatch(batchCorrelationId);
+        // Clean up batch data from memory after aggregation
+        cleanupBatch(standardId);
 
         return aggregatedEvents;
     }
 
     /**
-     * Limpa os dados do lote da memória após processamento
+     * Cleans up batch data from memory after processing
      */
     private void cleanupBatch(String batchCorrelationId) {
-        externalRecords.remove(batchCorrelationId);
-        isinRecords.remove(batchCorrelationId);
-        internalRecords.remove(batchCorrelationId);
-        LOG.infof("Dados do lote %s removidos da memória", batchCorrelationId);
+        String standardId = standardizeCorrelationId(batchCorrelationId);
+        externalRecords.remove(standardId);
+        isinRecords.remove(standardId);
+        internalRecords.remove(standardId);
+        LOG.infof("Batch data %s removed from memory", standardId);
     }
 
     /**
-     * Serializa eventos agregados para JSON
+     * Serializes aggregated events to JSON
      */
     public List<String> serializeEvents(List<AggregatedEvent> events) {
         return events.stream()
@@ -219,11 +246,11 @@ public class AggregationUseCase {
                     try {
                         return objectMapper.writeValueAsString(event);
                     } catch (Exception e) {
-                        LOG.errorf("Erro ao serializar evento %s: %s", event.getEventId(), e.getMessage());
+                        LOG.errorf("Error serializing event %s: %s", event.getEventId(), e.getMessage());
                         return null;
                     }
                 })
                 .filter(Objects::nonNull)
-                .toList();
+                .collect(Collectors.toList());
     }
 }
