@@ -1,62 +1,23 @@
 # quarkus-camel-kafka
 
-This project uses Quarkus, the Supersonic Subatomic Java Framework.
+![img.png](img.png)
 
-If you want to learn more about Quarkus, please visit its website: <https://quarkus.io/>.
+**Overview**:
 
-## Running the application in dev mode
+Our system processes three types of CSV files (external, ISIN, and Internal), aggregates the data based on correlation keys (so, we truly needs something to make relation) and sends the results to Kafka.
 
-You can run your application in dev mode that enables live coding using:
+We've **FileWatcherRoute**: Basically, the purpose is monitors the input directory for new CSV files and routes them to the appropriate processor based on filename pattern. Extracts correlation ID (batch_id) from filenames, based on date and implements file locking to ensure only one thread processes each file. And use file component with idempotent processing to prevent duplicate processing.
 
-```shell script
-./mvnw quarkus:dev
-```
+**CsvProcessingUseCase**: Purpose to parses and validates CSV content, and creating entities for storage. So, there we can validates headers and file structure, converts CSV rows to domain entities, saves records to the database, updates batch status.
 
-> **_NOTE:_**  Quarkus now ships with a Dev UI, which is available in dev mode only at <http://localhost:8080/q/dev/>.
+**BatchProcessingRepository**: It's the central component for tracking batch status, so, we can tracks which file types have been received for each batch, determines when a batch is ready for processing, and manages batch state transitions (PENDING -> PROCESSING > AGGREGATED > COMPLETED).
 
-## Packaging and running the application
+**RouteUtils**: Utility class that checks if a batch is ready for aggregation. So, queries batch status and trigger aggregation when all required files are received.
 
-The application can be packaged using:
+**BatchAggregationRoute**: Coordinates batch aggregation and Kafka Publishing, and implements a timer that periodically checks for ready batches and makes aggregated data to Kafka publishing.
 
-```shell script
-./mvnw package
-```
+**AggregationUseCase**: Core business logic for data aggregation, so, retrieve all data for a batch from all three tables, create correlation maps for efficient lookups, combine data from all sources based on correlation keys, and then creates aggregated events and stores them, in the end updates batch status too.
 
-It produces the `quarkus-run.jar` file in the `target/quarkus-app/` directory.
-Be aware that it’s not an _über-jar_ as the dependencies are copied into the `target/quarkus-app/lib/` directory.
+**KafkaPublisherUseCase**: Reliable delivery of aggregated events to Kafka.
 
-The application is now runnable using `java -jar target/quarkus-app/quarkus-run.jar`.
-
-If you want to build an _über-jar_, execute the following command:
-
-```shell script
-./mvnw package -Dquarkus.package.jar.type=uber-jar
-```
-
-The application, packaged as an _über-jar_, is now runnable using `java -jar target/*-runner.jar`.
-
-## Creating a native executable
-
-You can create a native executable using:
-
-```shell script
-./mvnw package -Dnative
-```
-
-Or, if you don't have GraalVM installed, you can run the native executable build in a container using:
-
-```shell script
-./mvnw package -Dnative -Dquarkus.native.container-build=true
-```
-
-You can then execute your native executable with: `./target/quarkus-camel-kafka-1.0.0-SNAPSHOT-runner`
-
-If you want to learn more about building native executables, please consult <https://quarkus.io/guides/maven-tooling>.
-
-## Related Guides
-
-- Camel File ([guide](https://camel.apache.org/camel-quarkus/latest/reference/extensions/file.html)): Read and write files
-- Camel Core ([guide](https://camel.apache.org/camel-quarkus/latest/reference/extensions/core.html)): Camel core functionality and basic Camel languages: Constant, ExchangeProperty, Header, Ref, Simple and Tokenize
-- Camel CSV ([guide](https://camel.apache.org/camel-quarkus/latest/reference/extensions/csv.html)): Handle CSV (Comma Separated Values) payloads
-- Camel Kafka ([guide](https://camel.apache.org/camel-quarkus/latest/reference/extensions/kafka.html)): Sent and receive messages to/from an Apache Kafka broker
-- JDBC Driver - PostgreSQL ([guide](https://quarkus.io/guides/datasource)): Connect to the PostgreSQL database via JDBC
+**ErrorHandlingRoute**: Centralized error handling for Camel Routes, there we processes exception from all routes, determines appropriate handling based on exception type, moves files to error directory when appropriate and trigger incident creating and monitoring.
