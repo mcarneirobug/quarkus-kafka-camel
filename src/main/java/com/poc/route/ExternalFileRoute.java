@@ -1,7 +1,6 @@
 package com.poc.route;
 
 import com.poc.enums.FileType;
-import com.poc.usecase.AggregationUseCase;
 import com.poc.usecase.CsvProcessingUseCase;
 import com.poc.usecase.MonitoringUseCase;
 import com.poc.utils.RouteUtils;
@@ -31,20 +30,18 @@ public class ExternalFileRoute extends RouteBuilder {
     private static final String ERROR_PROCESSING_EXTERNAL_FILE = "Error processing external file %s: %s";
 
     private final CsvProcessingUseCase csvProcessingUseCase;
-    private final AggregationUseCase aggregationUseCase;
     private final MonitoringUseCase monitoringUseCase;
     private final RouteUtils routeUtils;
 
     @Inject
-    public ExternalFileRoute(CsvProcessingUseCase csvProcessingUseCase, AggregationUseCase aggregationUseCase, MonitoringUseCase monitoringUseCase, RouteUtils routeUtils) {
+    public ExternalFileRoute(CsvProcessingUseCase csvProcessingUseCase, MonitoringUseCase monitoringUseCase, RouteUtils routeUtils) {
         this.csvProcessingUseCase = csvProcessingUseCase;
-        this.aggregationUseCase = aggregationUseCase;
         this.monitoringUseCase = monitoringUseCase;
         this.routeUtils = routeUtils;
     }
 
     @Override
-    public void configure() throws Exception {
+    public void configure() {
         from("direct:processExternalFile")
                 .id(EXTERNAL_FILE_ROUTE)
                 .log(INFO, "Processing external file: ${header.CamelFileName}")
@@ -89,9 +86,6 @@ public class ExternalFileRoute extends RouteBuilder {
                     var records = csvProcessingUseCase.processExternalCsv(content, fileName, correlationId);
 
                     LOG.infof(EXTERNAL_FILE_CONTAIN_RECORD, fileName, records.size());
-
-                    // Add records for later aggregation
-//                    aggregationUseCase.addExternalBatch(records, correlationId);
 
                     // Record processing metrics
                     long processingTime = System.currentTimeMillis() - startTime;

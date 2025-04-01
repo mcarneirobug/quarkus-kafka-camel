@@ -169,7 +169,7 @@ public class MonitoringUseCase {
         } else if (exception instanceof KafkaException) {
             type = ProcessingIncident.Type.KAFKA_ERROR;
         } else {
-            type = ProcessingIncident.Type.BUSINESS_LOGIC_ERROR; // Padrão
+            type = ProcessingIncident.Type.BUSINESS_LOGIC_ERROR;
         }
         return type;
     }

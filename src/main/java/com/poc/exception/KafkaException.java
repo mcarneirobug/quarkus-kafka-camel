@@ -1,14 +1,30 @@
 package com.poc.exception;
 
-import com.poc.model.generated.ProcessingIncident;
+public class KafkaException extends RuntimeException {
 
-public class KafkaException extends FileProcessingException {
+    private final String topic;
 
-    public KafkaException(String message, ProcessingIncident incident) {
-        super(message, incident);
+    public KafkaException(String message) {
+        super(message);
+        this.topic = null;
     }
 
-    public KafkaException(String message, Throwable cause, ProcessingIncident incident) {
-        super(message, cause, incident);
+    public KafkaException(String message, Throwable cause) {
+        super(message, cause);
+        this.topic = null;
+    }
+
+    public KafkaException(String message, String topic) {
+        super(message);
+        this.topic = topic;
+    }
+
+    public KafkaException(String message, Throwable cause, String topic) {
+        super(message, cause);
+        this.topic = topic;
+    }
+
+    public String getTopic() {
+        return topic;
     }
 }

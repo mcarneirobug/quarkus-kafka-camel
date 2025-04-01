@@ -1,5 +1,6 @@
 package com.poc.route;
 
+import com.poc.enums.FileType;
 import com.poc.usecase.MonitoringUseCase;
 
 import jakarta.enterprise.context.ApplicationScoped;
@@ -78,13 +79,13 @@ public class ErrorHandlingRoute extends RouteBuilder {
      */
     private String determineFileType(String fileName) {
         if (Pattern.matches(externalFilePattern, fileName)) {
-            return "EXTERNAL";
+            return FileType.EXTERNAL.name();
         } else if (Pattern.matches(isinFilePattern, fileName)) {
-            return "ISIN";
+            return FileType.ISIN.name();
         } else if (Pattern.matches(internalFilePattern, fileName)) {
-            return "INTERNAL";
+            return FileType.INTERNAL.name();
         } else {
-            return "UNKNOWN";
+            return FileType.UNKNOWN.name();
         }
     }
 }

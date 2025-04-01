@@ -2,33 +2,48 @@ package com.poc.route;
 
 import com.poc.model.entity.AggregatedEvent;
 import com.poc.model.entity.BatchProcessing;
+
 import com.poc.repository.BatchProcessingRepository;
+
 import com.poc.usecase.AggregationUseCase;
-import com.poc.usecase.KafkaEmitterUseCase;
 import com.poc.usecase.KafkaPublisherUseCase;
 import com.poc.usecase.MonitoringUseCase;
+
 import jakarta.enterprise.context.ApplicationScoped;
+
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
+
 import org.apache.camel.CamelContext;
 import org.apache.camel.Exchange;
-import org.apache.camel.LoggingLevel;
 import org.apache.camel.ProducerTemplate;
 import org.apache.camel.builder.RouteBuilder;
+
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+
 import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.concurrent.CompletionStage;
-import java.util.stream.Collectors;
+
+import static org.apache.camel.LoggingLevel.INFO;
+import static org.apache.camel.LoggingLevel.WARN;
 
 @ApplicationScoped
 public class BatchAggregationRoute extends RouteBuilder {
 
     protected static final Logger LOG = Logger.getLogger(BatchAggregationRoute.class);
+
     private static final String BATCH_AGGREGATION_ROUTE = "batchAggregationRoute";
     private static final String SEND_EVENTS_ROUTE = "sendEventsRoute";
     private static final String BATCH_POLLING_ROUTE = "batchPollingRoute";
+    private static final String BATCH_PROCESSING_ROUTE_LOCATION = "BatchProcessingRoute";
+    private static final String BATCH_ID_HEADER = "batchId";
+    private static final String AGGREGATION_STATUS_HEADER = "aggregationStatus";
+    private static final String EVENT_COUNT_HEADER = "eventCount";
+    private static final String COMPLETED_STATUS = "COMPLETED";
+    private static final String ERROR_STATUS = "ERROR";
+    private static final String DIRECT_TRIGGER_AGGREGATION = "direct:triggerAggregation";
 
     private final AggregationUseCase aggregationUseCase;
     private final KafkaPublisherUseCase kafkaEmitterUseCase;
@@ -56,11 +71,11 @@ public class BatchAggregationRoute extends RouteBuilder {
     @Override
     public void configure() {
         // Route to manually trigger aggregation for a batch
-        from("direct:triggerAggregation")
+        from(DIRECT_TRIGGER_AGGREGATION)
                 .id(BATCH_AGGREGATION_ROUTE)
-                .log(LoggingLevel.INFO, "Triggering aggregation for batch: ${header.batchId}")
+                .log(INFO, "Triggering aggregation for batch: ${header.batchId}")
                 .process(exchange -> {
-                    String batchId = exchange.getIn().getHeader("batchId", String.class);
+                    String batchId = exchange.getIn().getHeader(BATCH_ID_HEADER, String.class);
 
                     if (batchId == null || batchId.isEmpty()) {
                         throw new IllegalArgumentException("batchId header is required");
@@ -69,7 +84,7 @@ public class BatchAggregationRoute extends RouteBuilder {
                     // Check if batch is ready
                     if (!aggregationUseCase.isBatchComplete(batchId)) {
                         LOG.warnf("Batch %s is not complete, cannot trigger aggregation", batchId);
-                        exchange.getIn().setHeader("aggregationStatus", "INCOMPLETE");
+                        exchange.getIn().setHeader(AGGREGATION_STATUS_HEADER, "INCOMPLETE");
                         return;
                     }
 
@@ -77,29 +92,29 @@ public class BatchAggregationRoute extends RouteBuilder {
                     try {
                         List<AggregatedEvent> events = aggregationUseCase.processBatch(batchId);
                         exchange.getIn().setBody(events);
-                        exchange.getIn().setHeader("aggregationStatus", "SUCCESS");
-                        exchange.getIn().setHeader("eventCount", events.size());
+                        exchange.getIn().setHeader(AGGREGATION_STATUS_HEADER, "SUCCESS");
+                        exchange.getIn().setHeader(EVENT_COUNT_HEADER, events.size());
                         LOG.infof("Aggregation successful for batch %s, created %d events",
                                 batchId, events.size());
                     } catch (Exception e) {
                         LOG.errorf("Error during aggregation for batch %s: %s", batchId, e.getMessage());
-                        exchange.getIn().setHeader("aggregationStatus", "ERROR");
+                        exchange.getIn().setHeader(AGGREGATION_STATUS_HEADER, ERROR_STATUS);
                         throw e;
                     }
                 })
                 .choice()
-                .when(header("aggregationStatus").isEqualTo("SUCCESS"))
-                .to("direct:sendEvents")
+                    .when(header(AGGREGATION_STATUS_HEADER).isEqualTo("SUCCESS"))
+                        .to("direct:sendEvents")
                 .otherwise()
-                .log(LoggingLevel.WARN, "Skipping event sending due to aggregation status: ${header.aggregationStatus}")
+                    .log(WARN, "Skipping event sending due to aggregation status: ${header.aggregationStatus}")
                 .end();
 
         // Route to send aggregated events to Kafka
         from("direct:sendEvents")
                 .id(SEND_EVENTS_ROUTE)
-                .log(LoggingLevel.INFO, "Sending ${header.eventCount} events to Kafka for batch: ${header.batchId}")
+                .log(INFO, "Sending ${header.eventCount} events to Kafka for batch: ${header.batchId}")
                 .process(exchange -> {
-                    String batchId = exchange.getIn().getHeader("batchId", String.class);
+                    String batchId = exchange.getIn().getHeader(BATCH_ID_HEADER, String.class);
                     @SuppressWarnings("unchecked")
                     List<AggregatedEvent> events = exchange.getIn().getBody(List.class);
 
@@ -111,22 +126,22 @@ public class BatchAggregationRoute extends RouteBuilder {
                     // Extract the JSON payloads
                     List<String> payloads = events.stream()
                             .map(AggregatedEvent::getEventJson)
-                            .collect(Collectors.toList());
+                            .toList();
 
                     // Set up for Kafka route
                     exchange.getIn().setBody(payloads);
-                    exchange.getIn().setHeader("eventCount", payloads.size());
+                    exchange.getIn().setHeader(EVENT_COUNT_HEADER, payloads.size());
 
                     try {
                         // Send events using emitter (this will block until completed)
                         CompletionStage<Void> result = kafkaEmitterUseCase.sendEvents(payloads, batchId);
-                        result.toCompletableFuture().join();  // Wait for completion
+                        result.toCompletableFuture().join();
 
                         // Mark events as sent
                         kafkaEmitterUseCase.markEventsAsSent(events);
 
                         // Update batch status
-                        batchProcessingRepository.updateStatus(batchId, "COMPLETED");
+                        batchProcessingRepository.updateStatus(batchId, COMPLETED_STATUS);
 
                         LOG.infof("Successfully sent %d events to Kafka for batch %s",
                                 payloads.size(), batchId);
@@ -134,20 +149,20 @@ public class BatchAggregationRoute extends RouteBuilder {
                         LOG.errorf("Error sending events to Kafka: %s", e.getMessage());
                         monitoringUseCase.logIncident("N/A", "KAFKA",
                                 "Error sending events: " + e.getMessage(),
-                                "BatchProcessingRoute", e, batchId);
+                                BATCH_PROCESSING_ROUTE_LOCATION, e, batchId);
 
                         // Update batch status
-                        batchProcessingRepository.updateStatus(batchId, "ERROR");
+                        batchProcessingRepository.updateStatus(batchId, ERROR_STATUS);
 
                         throw e;
                     }
                 })
-                .log(LoggingLevel.INFO, "Kafka sending complete for batch: ${header.batchId}");
+                .log(INFO, "Kafka sending complete for batch: ${header.batchId}");
 
-        // Create a simple timer route that handles batch processing in a single processor
+        // Timer route that handles batch processing in a single processor
         from("timer:batchChecker?period=" + pollingIntervalMs)
                 .routeId(BATCH_POLLING_ROUTE)
-                .log(LoggingLevel.INFO, "Checking for batches ready for processing")
+                .log(INFO, "Checking for batches ready for processing")
                 .process(this::processPendingBatches);
     }
 
@@ -177,26 +192,26 @@ public class BatchAggregationRoute extends RouteBuilder {
 
                 try {
                     // Create a new exchange with the batch ID header
-                    Exchange batchExchange = camelContext.getEndpoint("direct:triggerAggregation")
+                    Exchange batchExchange = camelContext.getEndpoint(DIRECT_TRIGGER_AGGREGATION)
                             .createExchange();
-                    batchExchange.getIn().setHeader("batchId", batchId);
+                    batchExchange.getIn().setHeader(BATCH_ID_HEADER, batchId);
 
                     // Send to the aggregation route
-                    producer.send("direct:triggerAggregation", batchExchange);
+                    producer.send(DIRECT_TRIGGER_AGGREGATION, batchExchange);
 
                     LOG.infof("Batch %s sent for aggregation", batchId);
                 } catch (Exception e) {
                     LOG.errorf("Error processing batch %s: %s", batchId, e.getMessage());
                     monitoringUseCase.logIncident("N/A", "BATCH_PROCESSING",
                             "Error in batch polling: " + e.getMessage(),
-                            "BatchProcessingRoute", e, batchId);
+                            BATCH_PROCESSING_ROUTE_LOCATION, e, batchId);
                 }
             }
         } catch (Exception e) {
             LOG.errorf("Error in batch polling process: %s", e.getMessage());
             monitoringUseCase.logIncident("N/A", "BATCH_PROCESSING",
                     "Error in batch polling: " + e.getMessage(),
-                    "BatchProcessingRoute", e, "POLLING");
+                    BATCH_PROCESSING_ROUTE_LOCATION, e, "POLLING");
         }
     }
 }
