@@ -43,8 +43,8 @@ public class FileWatcherRoute extends RouteBuilder {
     String internalFilePattern;
 
     @Override
-    public void configure() throws Exception {
-        from("file:" + inputDirectory + "?noop=false&moveFailed=" + errorDirectory +
+    public void configure() {
+        from("file:" + inputDirectory + "?idempotent=true" + "&noop=false&moveFailed=" + errorDirectory +
                 "&move=" + processedDirectory + "&include=.*\\.csv&readLock=changed&readLockMinAge=1000&initialDelay=5000")
                 .id(FILE_WATCHER_ROUTE)
                 .log(LoggingLevel.INFO, "File detected: ${header.CamelFileName}")
