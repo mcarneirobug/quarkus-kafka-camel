@@ -1,6 +1,8 @@
 package com.poc.usecase;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.poc.enums.ErrorType;
+import com.poc.enums.EventType;
 import com.poc.exception.*;
 
 import com.poc.model.generated.Details;
@@ -9,22 +11,25 @@ import com.poc.model.generated.Resolution;
 
 import jakarta.enterprise.context.ApplicationScoped;
 
+import jakarta.validation.ValidationException;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.Channel;
 import org.eclipse.microprofile.reactive.messaging.Emitter;
 
 import org.jboss.logging.Logger;
 
-import java.util.Date;
-import java.util.UUID;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 
 /**
- * UseCase responsável pelo monitoramento e criação de incidentes
+ * UseCase responsible for monitoring and error tracking
  */
 @ApplicationScoped
 public class MonitoringUseCase {
 
     private static final Logger LOG = Logger.getLogger(MonitoringUseCase.class);
+    private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ISO_DATE_TIME;
 
     @ConfigProperty(name = "app.monitoring.incident-topic")
     String incidentTopic;
@@ -35,13 +40,6 @@ public class MonitoringUseCase {
     public MonitoringUseCase(@Channel("incident-channel") Emitter<String> incidentEmitter, ObjectMapper objectMapper) {
         this.incidentEmitter = incidentEmitter;
         this.objectMapper = objectMapper;
-    }
-
-    /**
-     * Registra métricas e logs para o processamento de arquivos
-     */
-    public void recordFileProcessingMetric(String fileType, boolean success, long processingTimeMs) {
-        LOG.infof("Arquivo %s processado: sucesso=%s, tempo=%dms", fileType, success, processingTimeMs);
     }
 
     /**
@@ -96,6 +94,67 @@ public class MonitoringUseCase {
         return incident;
     }
 
+    /**
+     * Records metrics and logs for file processing
+     */
+    public void recordFileProcessingMetric(String fileType, boolean success, long processingTimeMs, String fileName, long fileSize) {
+        Map<String, Object> logEvent = new HashMap<>();
+        logEvent.put("eventType", EventType.FILE_PROCESSED.name());
+        logEvent.put("timestamp", LocalDateTime.now().format(DATE_TIME_FORMATTER));
+        logEvent.put("fileType", fileType);
+        logEvent.put("fileName", fileName);
+        logEvent.put("fileSize", fileSize);
+        logEvent.put("success", success);
+        logEvent.put("processingTimeMs", processingTimeMs);
+
+        logAsJson(EventType.FILE_PROCESSED.name(), logEvent);
+    }
+
+    /**
+     * Logs an incident in structured JSON format with type-safe error type
+     */
+    public void logIncident(String fileName, String fileType, String errorMessage,
+                            String errorLocation, Exception exception, String correlationId) {
+
+        String incidentId = UUID.randomUUID().toString();
+
+        ErrorType errorType = determineErrorType(exception);
+
+        // Create the incident log entry
+        Map<String, Object> incident = new HashMap<>();
+        incident.put("eventType", EventType.PROCESSING_INCIDENT.name());
+        incident.put("incidentId", incidentId);
+        incident.put("timestamp", LocalDateTime.now().format(DATE_TIME_FORMATTER));
+        incident.put("severity", "ERROR");
+        incident.put("errorType", errorType.name());
+        incident.put("message", errorMessage);
+
+        // Add details
+        Map<String, Object> details = new HashMap<>();
+        details.put("fileName", fileName);
+        details.put("fileType", fileType);
+        details.put("errorLocation", errorLocation);
+        if (exception != null) {
+            details.put("exceptionType", exception.getClass().getName());
+            details.put("exceptionMessage", exception.getMessage());
+
+            // Add stack trace (first 5 elements)
+            StackTraceElement[] stackTrace = exception.getStackTrace();
+            if (stackTrace != null && stackTrace.length > 0) {
+                List<String> stackTraceLines = Arrays.stream(stackTrace)
+                        .limit(5)
+                        .map(StackTraceElement::toString)
+                        .toList();
+                details.put("stackTrace", stackTraceLines);
+            }
+        }
+        incident.put("details", details);
+        incident.put("correlationId", correlationId);
+
+        logAsJson(EventType.PROCESSING_INCIDENT.name(), incident);
+    }
+
+
     private static ProcessingIncident.Type getType(Exception exception) {
         ProcessingIncident.Type type;
 
@@ -139,26 +198,45 @@ public class MonitoringUseCase {
     }
 
     /**
-     * Método completo para criar e registrar um incidente a partir de uma exceção
+     * Handle exceptions from file processing
      */
     public void handleException(FileProcessingException exception, String correlationId) {
-        ProcessingIncident incident;
+        String fileName = "unknown";
+        String fileType = "UNKNOWN";
+        String errorLocation = "unknown";
 
-        // Se já houver um incidente na exceção, utiliza ele
-        if (exception.getIncident() != null) {
-            incident = exception.getIncident();
-        } else {
-            // Extrai informações da exceção
-            String fileName = "unknown";
-            String fileType = "UNKNOWN";
-            String errorLocation = "unknown";
+        logIncident(fileName, fileType, exception.getMessage(),
+                errorLocation, exception, correlationId);
+    }
 
-            incident = createIncident(
-                    fileName, fileType, exception.getMessage(),
-                    errorLocation, exception, correlationId, "MANUAL_INTERVENTION_REQUIRED"
-            );
+    /**
+     * Serialize and log a structured event as JSON
+     */
+    private void logAsJson(String eventType, Map<String, Object> event) {
+        try {
+            String json = objectMapper.writeValueAsString(event);
+            LOG.info(json);
+        } catch (Exception e) {
+            LOG.errorf("Failed to serialize %s event to JSON: %s", eventType, e.getMessage());
+            LOG.info(event.toString());
+        }
+    }
+
+    /**
+     * Determine error type based on exception - now returns an enum
+     */
+    private ErrorType determineErrorType(Exception exception) {
+        if (exception == null) {
+            return ErrorType.UNKNOWN_ERROR;
         }
 
-        registerIncident(incident);
+        return switch (exception) {
+            case java.io.IOException ioException -> ErrorType.IO_ERROR;
+            case ValidationException validationException -> ErrorType.VALIDATION_ERROR;
+            case FileTransformationException fileTransformationException -> ErrorType.TRANSFORMATION_ERROR;
+            case BusinessLogicException businessLogicException -> ErrorType.BUSINESS_LOGIC_ERROR;
+            case org.apache.kafka.common.KafkaException kafkaException -> ErrorType.KAFKA_ERROR;
+            default -> ErrorType.APP_ERROR;
+        };
     }
 }

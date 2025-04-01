@@ -1,5 +1,6 @@
 package com.poc.route;
 
+import com.poc.enums.FileType;
 import com.poc.usecase.AggregationUseCase;
 import com.poc.usecase.CsvProcessingUseCase;
 import com.poc.usecase.MonitoringUseCase;
@@ -23,6 +24,12 @@ public class ExternalFileRoute extends RouteBuilder {
 
     protected static final Logger LOG = Logger.getLogger(ExternalFileRoute.class);
 
+    private static final String EXTERNAL_FILE_ROUTE = "externalFileRoute";
+    private static final String CORRELATION_ID = "correlationId";
+    private static final String EXTERNAL_FILE_CONTAIN_RECORD = "External file %s contains %d records";
+    private static final String CORRELATION_DEBUG = "CORRELATION DEBUG - External processing with correlationId: %s";
+    private static final String ERROR_PROCESSING_EXTERNAL_FILE = "Error processing external file %s: %s";
+
     private final CsvProcessingUseCase csvProcessingUseCase;
     private final AggregationUseCase aggregationUseCase;
     private final MonitoringUseCase monitoringUseCase;
@@ -39,52 +46,56 @@ public class ExternalFileRoute extends RouteBuilder {
     @Override
     public void configure() throws Exception {
         from("direct:processExternalFile")
-                .id("externalFileRoute")
+                .id(EXTERNAL_FILE_ROUTE)
                 .log(INFO, "Processing external file: ${header.CamelFileName}")
                 .onException(Exception.class)
-                .handled(true)
-                .process(exchange -> {
-                    Exception exception = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
-                    String fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
-                    String correlationId = exchange.getIn().getHeader("correlationId", String.class);
+                    .handled(true)
+                    .process(exchange -> {
+                        var exception = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
+                        var fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
+                        var correlationId = exchange.getIn().getHeader(CORRELATION_ID, String.class);
+                        var fileSize = exchange.getIn().getHeader(Exchange.FILE_LENGTH, 0L, Long.class);
 
-                    LOG.errorf("Error processing external file %s: %s", fileName, exception.getMessage());
+                        LOG.errorf(ERROR_PROCESSING_EXTERNAL_FILE, fileName, exception.getMessage());
 
-                    // Registra métricas de erro
-                    monitoringUseCase.recordFileProcessingMetric("EXTERNAL", false, 0);
+                        // Log the incident with file details
+                        monitoringUseCase.logIncident(fileName, FileType.EXTERNAL.name(), exception.getMessage(), "Processing external file", exception, correlationId);
+                        monitoringUseCase.recordFileProcessingMetric(FileType.EXTERNAL.name(), false, 0, fileName, fileSize);
 
-                    // Criar incidente
-                    ProcessingIncident incident = monitoringUseCase.createIncident(
-                            fileName, "EXTERNAL", exception.getMessage(),
-                            "Parsing CSV", exception, correlationId, "MOVED_TO_ERROR");
+                        // TODO see this after
+                        ProcessingIncident incident = monitoringUseCase.createIncident(
+                                fileName, "EXTERNAL", exception.getMessage(),
+                                "Parsing CSV", exception, correlationId, "MOVED_TO_ERROR");
 
-                    if (exception instanceof IOException) {
-                        throw new FileIOException("I/O error while processing external file", exception, incident);
-                    } else {
-                        throw new FileValidationException("Validation error in external file", exception, incident);
-                    }
-                })
+                        if (exception instanceof IOException) {
+                            throw new FileIOException("I/O error while processing external file", exception, incident);
+                        } else {
+                            throw new FileValidationException("Validation error in external file", exception, incident);
+                        }
+                    })
                 .to("direct:processError")
                 .end()
                 .process(exchange -> {
-                    String content = exchange.getIn().getBody(String.class);
-                    String fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
-                    String correlationId = exchange.getIn().getHeader("correlationId", String.class);
-                    LOG.debugf("CORRELATION DEBUG - External processing with correlationId: %s", correlationId);
+                    var content = exchange.getIn().getBody(String.class);
+                    var fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
+                    var correlationId = exchange.getIn().getHeader(CORRELATION_ID, String.class);
+                    var fileSize = exchange.getIn().getHeader(Exchange.FILE_LENGTH, 0L, Long.class);
+
+                    LOG.debugf(CORRELATION_DEBUG, correlationId);
 
                     long startTime = System.currentTimeMillis();
 
-                    // Process the external CSV file
+                    // Process the external CSV file & save to DB
                     var records = csvProcessingUseCase.processExternalCsv(content, fileName, correlationId);
 
-                    LOG.infof("External file %s contains %d records", fileName, records.size());
+                    LOG.infof(EXTERNAL_FILE_CONTAIN_RECORD, fileName, records.size());
 
                     // Add records for later aggregation
-                    aggregationUseCase.addExternalBatch(records, correlationId);
+//                    aggregationUseCase.addExternalBatch(records, correlationId);
 
                     // Record processing metrics
                     long processingTime = System.currentTimeMillis() - startTime;
-                    monitoringUseCase.recordFileProcessingMetric("EXTERNAL", true, processingTime);
+                    monitoringUseCase.recordFileProcessingMetric(FileType.EXTERNAL.name(), true, processingTime, fileName, fileSize);
 
                     // Check if all files have been received and trigger aggregation if complete
                     routeUtils.checkAndTriggerAggregation(correlationId);

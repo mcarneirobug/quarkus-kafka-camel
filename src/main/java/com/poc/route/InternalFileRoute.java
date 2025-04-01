@@ -29,14 +29,12 @@ public class InternalFileRoute extends RouteBuilder {
     protected static final Logger LOG = Logger.getLogger(InternalFileRoute.class);
 
     private final CsvProcessingUseCase csvProcessingUseCase;
-    private final AggregationUseCase aggregationUseCase;
     private final MonitoringUseCase monitoringUseCase;
     private final RouteUtils routeUtils;
 
     @Inject
-    public InternalFileRoute(CsvProcessingUseCase csvProcessingUseCase, AggregationUseCase aggregationUseCase, MonitoringUseCase monitoringUseCase, RouteUtils routeUtils) {
+    public InternalFileRoute(CsvProcessingUseCase csvProcessingUseCase, MonitoringUseCase monitoringUseCase, RouteUtils routeUtils) {
         this.csvProcessingUseCase = csvProcessingUseCase;
-        this.aggregationUseCase = aggregationUseCase;
         this.monitoringUseCase = monitoringUseCase;
         this.routeUtils = routeUtils;
     }
@@ -47,34 +45,38 @@ public class InternalFileRoute extends RouteBuilder {
                 .id("internalFileRoute")
                 .log(INFO, "Processing internal file: ${header.CamelFileName}")
                 .onException(Exception.class)
-                .handled(true)
-                .process(exchange -> {
-                    Exception exception = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
-                    String fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
-                    String correlationId = exchange.getIn().getHeader("correlationId", String.class);
+                    .handled(true)
+                    .process(exchange -> {
+                        var exception = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class);
+                        var fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
+                        var correlationId = exchange.getIn().getHeader("correlationId", String.class);
+                        var fileSize = exchange.getIn().getHeader(Exchange.FILE_LENGTH, 0L, Long.class);
 
-                    LOG.errorf("Error processing internal file %s: %s", fileName, exception.getMessage());
+                        LOG.errorf("Error processing internal file %s: %s", fileName, exception.getMessage());
 
-                    // Registra métricas de erro
-                    monitoringUseCase.recordFileProcessingMetric("INTERNAL", false, 0);
+                        // Registra métricas de erro
+                        monitoringUseCase.logIncident(fileName, "INTERNAL", exception.getMessage(), "Processing internal file", exception, correlationId);
+                        monitoringUseCase.recordFileProcessingMetric("INTERNAL", false, 0, fileName, fileSize);
 
-                    // Criar incidente
-                    ProcessingIncident incident = monitoringUseCase.createIncident(
-                            fileName, "INTERNAL", exception.getMessage(),
-                            "Parsing CSV", exception, correlationId, "MOVED_TO_ERROR");
+                        // Criar incidente
+                        ProcessingIncident incident = monitoringUseCase.createIncident(
+                                fileName, "INTERNAL", exception.getMessage(),
+                                "Parsing CSV", exception, correlationId, "MOVED_TO_ERROR");
 
-                    if (exception instanceof IOException) {
-                        throw new FileIOException("I/O error while processing internal file", exception, incident);
-                    } else {
-                        throw new FileValidationException("Validation error in internal file", exception, incident);
-                    }
-                })
-                .to("direct:processError")
+                        if (exception instanceof IOException) {
+                            throw new FileIOException("I/O error while processing internal file", exception, incident);
+                        } else {
+                            throw new FileValidationException("Validation error in internal file", exception, incident);
+                        }
+                    })
+                    .to("direct:processError")
                 .end()
                 .process(exchange -> {
-                    String content = exchange.getIn().getBody(String.class);
-                    String fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
-                    String correlationId = exchange.getIn().getHeader("correlationId", String.class);
+                    var content = exchange.getIn().getBody(String.class);
+                    var fileName = exchange.getIn().getHeader(Exchange.FILE_NAME, String.class);
+                    var correlationId = exchange.getIn().getHeader("correlationId", String.class);
+                    var fileSize = exchange.getIn().getHeader(Exchange.FILE_LENGTH, 0L, Long.class);
+
                     LOG.debugf("CORRELATION DEBUG - Internal processing with correlationId: %s", correlationId);
 
                     long startTime = System.currentTimeMillis();
@@ -85,11 +87,11 @@ public class InternalFileRoute extends RouteBuilder {
                     LOG.infof("Internal file %s contains %d records", fileName, records.size());
 
                     // Add records for later aggregation
-                    aggregationUseCase.addInternalBatch(records, correlationId);
+//                    aggregationUseCase.addInternalBatch(records, correlationId);
 
                     // Record processing metrics
                     long processingTime = System.currentTimeMillis() - startTime;
-                    monitoringUseCase.recordFileProcessingMetric("INTERNAL", true, processingTime);
+                    monitoringUseCase.recordFileProcessingMetric("INTERNAL", true, processingTime, fileName, fileSize);
 
                     // Check if all files have been received and trigger aggregation if complete
                     routeUtils.checkAndTriggerAggregation(correlationId);

@@ -1,271 +1,333 @@
 package com.poc.usecase;
 
-import com.poc.exception.FileValidationException;
-import com.poc.model.ExternalCsvRecord;
-import com.poc.model.InternalCsvRecord;
-import com.poc.model.IsinCsvRecord;
-import com.poc.model.generated.ProcessingIncident;
+import com.poc.enums.FileType;
+import com.poc.model.entity.BatchProcessing;
+import com.poc.model.entity.ExternalData;
+import com.poc.model.entity.InternalData;
+import com.poc.model.entity.IsinData;
+import com.poc.repository.BatchProcessingRepository;
+import com.poc.repository.ExternalDataRepository;
+import com.poc.repository.InternalDataRepository;
+import com.poc.repository.IsinDataRepository;
 import com.poc.utils.CsvUtils;
-
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @ApplicationScoped
 public class CsvProcessingUseCase {
 
     private static final Logger LOG = Logger.getLogger(CsvProcessingUseCase.class);
 
+    private static final String EXTERNAL_CSV_HEADERS = "externalId;externalName;externalValue;correlationKey";
+    private static final String ISIN_CSV_HEADERS = "isin;isinDescription;isinCategory;correlationKey";
+    private static final String INTERNAL_CSV_HEADERS = "internalId;internalCode;internalAmount;correlationKey";
+    private static final String FILE_NAME = "fileName";
+    public static final String EMPTY_CSV_FILE_MESSAGE = "Empty CSV file";
+    public static final String CSV_PROCESSING_LOCATION = "CSV Processing";
+
+    private final BatchProcessingRepository batchProcessingRepository;
+    private final ExternalDataRepository externalDataRepository;
+    private final IsinDataRepository isinDataRepository;
+    private final InternalDataRepository internalDataRepository;
     private final MonitoringUseCase monitoringUseCase;
 
     @Inject
-    public CsvProcessingUseCase(MonitoringUseCase monitoringUseCase) {
+    public CsvProcessingUseCase(
+            BatchProcessingRepository batchProcessingRepository,
+            ExternalDataRepository externalDataRepository,
+            IsinDataRepository isinDataRepository,
+            InternalDataRepository internalDataRepository,
+            MonitoringUseCase monitoringUseCase) {
+        this.batchProcessingRepository = batchProcessingRepository;
+        this.externalDataRepository = externalDataRepository;
+        this.isinDataRepository = isinDataRepository;
+        this.internalDataRepository = internalDataRepository;
         this.monitoringUseCase = monitoringUseCase;
     }
 
     /**
-     * Processa um arquivo External CSV
+     * Process external CSV content, store in database, and update batch status
      */
-    public List<ExternalCsvRecord> processExternalCsv(String content, String fileName, String correlationId) {
-        LOG.infof("Processando conteúdo de arquivo externo: %s", fileName);
-        List<String> lines = CsvUtils.splitCsvLines(content);
+    @Transactional
+    public List<ExternalData> processExternalCsv(final String content, final String fileName, final String batchId) {
+        LOG.infof("Processing external file: %s for batch %s", fileName, batchId);
+
+        if (externalDataRepository.count(FILE_NAME, fileName) > 0) {
+            LOG.infof("File %s has already been processed, skipping", fileName);
+            return List.of();
+        }
+
+        var lines = CsvUtils.splitCsvLines(content);
         if (lines.isEmpty()) {
-            throw new FileValidationException("Arquivo CSV vazio ou inválido",
-                    createIncident(fileName, "EXTERNAL", "Arquivo CSV vazio", "Parsing", correlationId));
+            monitoringUseCase.logIncident(fileName, FileType.EXTERNAL.name(), EMPTY_CSV_FILE_MESSAGE,
+                    CSV_PROCESSING_LOCATION, null, batchId);
+            return List.of();
         }
 
-        // Pula a linha de cabeçalho
-        List<ExternalCsvRecord> records = new ArrayList<>();
+        validateHeader(lines.getFirst(), EXTERNAL_CSV_HEADERS, fileName, FileType.EXTERNAL.name(), batchId);
+
+        List<ExternalData> records = new ArrayList<>();
+
+        // Skip header
         for (int i = 1; i < lines.size(); i++) {
-            String line = lines.get(i);
-            String[] fields = CsvUtils.splitCsvFields(line, ";");
+            try {
+                String line = lines.get(i);
+                String[] fields = CsvUtils.splitCsvFields(line, ";");
 
-            if (fields.length < 4) {
-                throw new FileValidationException(
-                        "Linha " + i + " não tem todos os campos necessários",
-                        createIncident(fileName, "EXTERNAL",
-                                "Linha " + i + " tem apenas " + fields.length + " campos",
-                                "Parsing linha " + i, correlationId));
+                if (fields.length < 4) {
+                    monitoringUseCase.logIncident(fileName, "EXTERNAL",
+                            "Line " + i + " has insufficient fields: " + fields.length,
+                            CSV_PROCESSING_LOCATION, null, batchId);
+                    continue;
+                }
+
+                // Check if record already exists
+                List<ExternalData> existing = externalDataRepository.list(
+                        "batchId = ?1 and externalId = ?2 and correlationKey = ?3",
+                        batchId, fields[0].trim(), fields[3].trim());
+
+                if (!existing.isEmpty()) {
+                    LOG.infof("Record already exists for externalId=%s, correlationKey=%s in batch %s, skipping",
+                            fields[0].trim(), fields[3].trim(), batchId);
+                    continue;
+                }
+
+                ExternalData record = new ExternalData();
+                record.setId(UUID.randomUUID());
+                record.setBatchId(batchId);
+                record.setFileName(fileName);
+                record.setExternalId(fields[0].trim());
+                record.setExternalName(fields[1].trim());
+                record.setExternalValue(new BigDecimal(fields[2].trim()));
+                record.setCorrelationKey(fields[3].trim());
+
+                records.add(record);
+            } catch (Exception e) {
+                monitoringUseCase.logIncident(fileName, "EXTERNAL",
+                        "Error processing line " + i + ": " + e.getMessage(),
+                        CSV_PROCESSING_LOCATION, e, batchId);
             }
-
-            ExternalCsvRecord record = new ExternalCsvRecord();
-            record.setExternalId(CsvUtils.getStringField(fields, 0, null));
-            record.setExternalName(CsvUtils.getStringField(fields, 1, null));
-            record.setExternalValue(CsvUtils.getBigDecimalField(fields, 2, null));
-            record.setCorrelationKey(CsvUtils.getStringField(fields, 3, null));
-
-            // Validação
-            validateExternalRecord(record, i, fileName, correlationId);
-
-            records.add(record);
-            LOG.debugf("Processado registro externo: %s", record);
         }
 
-        LOG.infof("Processados %d registros externos do arquivo %s", records.size(), fileName);
-        return records;
-    }
-
-    public List<IsinCsvRecord> processIsinCsv(String content, String fileName, String correlationId) {
-        LOG.infof("Processando conteúdo de arquivo ISIN: %s", fileName);
-        List<String> lines = CsvUtils.splitCsvLines(content);
-        if (lines.isEmpty()) {
-            throw new FileValidationException("Arquivo CSV vazio ou inválido",
-                    createIncident(fileName, "ISIN", "Arquivo CSV vazio", "Parsing", correlationId));
-        }
-
-        // Pula a linha de cabeçalho
-        List<IsinCsvRecord> records = new ArrayList<>();
-        for (int i = 1; i < lines.size(); i++) {
-            String line = lines.get(i);
-            String[] fields = CsvUtils.splitCsvFields(line, ";");
-
-            if (fields.length < 4) {
-                throw new FileValidationException(
-                        "Linha " + i + " não tem todos os campos necessários",
-                        createIncident(fileName, "ISIN",
-                                "Linha " + i + " tem apenas " + fields.length + " campos",
-                                "Parsing linha " + i, correlationId));
+        // Save records to database
+        if (!records.isEmpty()) {
+            for (ExternalData external : records) {
+                externalDataRepository.persist(external);
             }
-
-            IsinCsvRecord record = new IsinCsvRecord();
-            record.setIsin(CsvUtils.getStringField(fields, 0, null));
-            record.setIsinDescription(CsvUtils.getStringField(fields, 1, null));
-            record.setIsinCategory(CsvUtils.getStringField(fields, 2, null));
-            record.setCorrelationKey(CsvUtils.getStringField(fields, 3, null));
-
-            // Validação
-            validateIsinRecord(record, i, fileName, correlationId);
-
-            records.add(record);
-            LOG.debugf("Processado registro ISIN: %s", record);
+            LOG.infof("Saved %d external records to database", records.size());
         }
 
-        LOG.infof("Processados %d registros ISIN do arquivo %s", records.size(), fileName);
-        return records;
-    }
+        // Update batch status
+        updateBatchStatus(batchId, FileType.EXTERNAL.name());
 
-    /**
-     * Processa um arquivo Internal CSV
-     */
-    public List<InternalCsvRecord> processInternalCsv(String content, String fileName, String correlationId) {
-        LOG.infof("Processando conteúdo de arquivo interno: %s", fileName);
-        List<String> lines = CsvUtils.splitCsvLines(content);
-        if (lines.isEmpty()) {
-            throw new FileValidationException("Arquivo CSV vazio ou inválido",
-                    createIncident(fileName, "INTERNAL", "Arquivo CSV vazio", "Parsing", correlationId));
-        }
-
-        // Pula a linha de cabeçalho
-        List<InternalCsvRecord> records = new ArrayList<>();
-        for (int i = 1; i < lines.size(); i++) {
-            String line = lines.get(i);
-            String[] fields = CsvUtils.splitCsvFields(line, ";");
-
-            if (fields.length < 4) {
-                throw new FileValidationException(
-                        "Linha " + i + " não tem todos os campos necessários",
-                        createIncident(fileName, "INTERNAL",
-                                "Linha " + i + " tem apenas " + fields.length + " campos",
-                                "Parsing linha " + i, correlationId));
-            }
-
-            InternalCsvRecord record = new InternalCsvRecord();
-            record.setInternalId(CsvUtils.getStringField(fields, 0, null));
-            record.setInternalCode(CsvUtils.getStringField(fields, 1, null));
-            record.setInternalAmount(CsvUtils.getBigDecimalField(fields, 2, null));
-            record.setCorrelationKey(CsvUtils.getStringField(fields, 3, null));
-
-            // Validação
-            validateInternalRecord(record, i, fileName, correlationId);
-
-            records.add(record);
-            LOG.debugf("Processado registro interno: %s", record);
-        }
-
-        LOG.infof("Processados %d registros internos do arquivo %s", records.size(), fileName);
+        LOG.infof("Processed external file %s: extracted %d records", fileName, records.size());
         return records;
     }
 
     /**
-     * Valida um registro External
+     * Process ISIN CSV content, store in database, and update batch status
      */
-    private void validateExternalRecord(ExternalCsvRecord record, int lineNumber, String fileName, String correlationId) {
-        if (record.getExternalId() == null || record.getExternalId().isEmpty()) {
-            throw new FileValidationException(
-                    "ExternalId não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "EXTERNAL",
-                            "ExternalId vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+    @Transactional
+    public List<IsinData> processIsinCsv(String content, String fileName, String batchId) {
+        LOG.infof("Processing ISIN file: %s for batch %s", fileName, batchId);
+
+        // Check if this file has already been processed
+        if (isinDataRepository.count(FILE_NAME, fileName) > 0) {
+            LOG.infof("ISIN file %s has already been processed, skipping", fileName);
+            return List.of();
         }
 
-        if (record.getExternalName() == null || record.getExternalName().isEmpty()) {
-            throw new FileValidationException(
-                    "ExternalName não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "EXTERNAL",
-                            "ExternalName vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        List<String> lines = CsvUtils.splitCsvLines(content);
+
+        if (lines.isEmpty()) {
+            monitoringUseCase.logIncident(fileName, FileType.ISIN.name(), EMPTY_CSV_FILE_MESSAGE,
+                    CSV_PROCESSING_LOCATION, null, batchId);
+            return List.of();
         }
 
-        if (record.getExternalValue() == null) {
-            throw new FileValidationException(
-                    "ExternalValue não pode ser nulo na linha " + lineNumber,
-                    createIncident(fileName, "EXTERNAL",
-                            "ExternalValue nulo na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        // Validate header
+        String headerLine = lines.getFirst();
+        if (!headerLine.trim().equalsIgnoreCase(ISIN_CSV_HEADERS)) {
+            LOG.warnf("ISIN CSV has unexpected header: %s", headerLine);
+            monitoringUseCase.logIncident(fileName, "ISIN",
+                    "Invalid header: " + headerLine,
+                    CSV_PROCESSING_LOCATION, null, batchId);
         }
 
-        if (record.getCorrelationKey() == null || record.getCorrelationKey().isEmpty()) {
-            throw new FileValidationException(
-                    "CorrelationKey não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "EXTERNAL",
-                            "CorrelationKey vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        List<IsinData> records = new ArrayList<>();
+
+        // Skip header
+        for (int i = 1; i < lines.size(); i++) {
+            try {
+                String line = lines.get(i);
+                String[] fields = CsvUtils.splitCsvFields(line, ";");
+
+                if (fields.length < 4) {
+                    monitoringUseCase.logIncident(fileName, FileType.ISIN.name(),
+                            "Line " + i + " has insufficient fields: " + fields.length,
+                            CSV_PROCESSING_LOCATION, null, batchId);
+                    continue;
+                }
+
+                IsinData record = new IsinData();
+                record.setId(UUID.randomUUID());
+                record.setBatchId(batchId);
+                record.setFileName(fileName);
+                record.setIsin(fields[0].trim());
+                record.setIsinDescription(fields[1].trim());
+                record.setIsinCategory(fields[2].trim());
+                record.setCorrelationKey(fields[3].trim());
+
+                records.add(record);
+            } catch (Exception e) {
+                monitoringUseCase.logIncident(fileName, FileType.ISIN.name(),
+                        "Error processing line " + i + ": " + e.getMessage(),
+                        CSV_PROCESSING_LOCATION, e, batchId);
+            }
         }
+
+        // Save records to database
+        if (!records.isEmpty()) {
+            for (IsinData isin : records) {
+                isinDataRepository.persist(isin);
+            }
+            LOG.infof("Saved %d ISIN records to database", records.size());
+        }
+
+        // Update batch status
+        updateBatchStatus(batchId, FileType.ISIN.name());
+
+        LOG.infof("Processed ISIN file %s: extracted %d records", fileName, records.size());
+        return records;
     }
 
     /**
-     * Valida um registro ISIN
+     * Process internal CSV content, store in database, and update batch status
      */
-    private void validateIsinRecord(IsinCsvRecord record, int lineNumber, String fileName, String correlationId) {
-        if (record.getIsin() == null || record.getIsin().isEmpty()) {
-            throw new FileValidationException(
-                    "ISIN não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "ISIN",
-                            "ISIN vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+    @Transactional
+    public List<InternalData> processInternalCsv(String content, String fileName, String batchId) {
+        LOG.infof("Processing internal file: %s for batch %s", fileName, batchId);
+
+        if (internalDataRepository.count(FILE_NAME, fileName) > 0) {
+            LOG.infof("Internal file %s has already been processed, skipping", fileName);
+            return List.of();
         }
 
-        if (record.getIsinDescription() == null || record.getIsinDescription().isEmpty()) {
-            throw new FileValidationException(
-                    "IsinDescription não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "ISIN",
-                            "IsinDescription vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        List<String> lines = CsvUtils.splitCsvLines(content);
+
+        if (lines.isEmpty()) {
+            monitoringUseCase.logIncident(fileName, FileType.INTERNAL.name(), EMPTY_CSV_FILE_MESSAGE,
+                    CSV_PROCESSING_LOCATION, null, batchId);
+            return List.of();
         }
 
-        if (record.getIsinCategory() == null || record.getIsinCategory().isEmpty()) {
-            throw new FileValidationException(
-                    "IsinCategory não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "ISIN",
-                            "IsinCategory vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        // Validate header
+        String headerLine = lines.getFirst();
+        if (!headerLine.trim().equalsIgnoreCase(INTERNAL_CSV_HEADERS)) {
+            LOG.warnf("Internal CSV has unexpected header: %s", headerLine);
+            monitoringUseCase.logIncident(fileName, FileType.INTERNAL.name(),
+                    "Invalid header: " + headerLine,
+                    CSV_PROCESSING_LOCATION, null, batchId);
         }
 
-        if (record.getCorrelationKey() == null || record.getCorrelationKey().isEmpty()) {
-            throw new FileValidationException(
-                    "CorrelationKey não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "ISIN",
-                            "CorrelationKey vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        List<InternalData> records = new ArrayList<>();
+
+        // Skip header
+        for (int i = 1; i < lines.size(); i++) {
+            try {
+                String line = lines.get(i);
+                String[] fields = CsvUtils.splitCsvFields(line, ";");
+
+                if (fields.length < 4) {
+                    monitoringUseCase.logIncident(fileName, FileType.INTERNAL.name(),
+                            "Line " + i + " has insufficient fields: " + fields.length,
+                            CSV_PROCESSING_LOCATION, null, batchId);
+                    continue;
+                }
+
+                InternalData internalData = new InternalData();
+                internalData.setId(UUID.randomUUID());
+                internalData.setBatchId(batchId);
+                internalData.setFileName(fileName);
+                internalData.setInternalId(fields[0].trim());
+                internalData.setInternalCode(fields[1].trim());
+                internalData.setInternalAmount(new BigDecimal(fields[2].trim()));
+                internalData.setCorrelationKey(fields[3].trim());
+
+                records.add(internalData);
+            } catch (Exception e) {
+                monitoringUseCase.logIncident(fileName, FileType.INTERNAL.name(),
+                        "Error processing line " + i + ": " + e.getMessage(),
+                        CSV_PROCESSING_LOCATION, e, batchId);
+            }
         }
+
+        // Save records to database
+        if (!records.isEmpty()) {
+            for (InternalData internal : records) {
+                internalDataRepository.persist(internal);
+            }
+            LOG.infof("Saved %d internal records to database", records.size());
+        }
+
+        // Update batch status
+        updateBatchStatus(batchId, FileType.INTERNAL.name());
+
+        LOG.infof("Processed internal file %s: extracted %d records", fileName, records.size());
+        return records;
     }
 
     /**
-     * Valida um registro Internal
+     * Update batch status and check if ready for processing
      */
-    private void validateInternalRecord(InternalCsvRecord record, int lineNumber, String fileName, String correlationId) {
-        if (record.getInternalId() == null || record.getInternalId().isEmpty()) {
-            throw new FileValidationException(
-                    "InternalId não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "INTERNAL",
-                            "InternalId vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+    @Transactional
+    protected void updateBatchStatus(String batchId, String fileType) {
+        LOG.infof("Updating batch status for %s: adding file type %s", batchId, fileType);
+
+        // Get or create batch record
+        BatchProcessing batch = batchProcessingRepository.findById(batchId);
+        if (batch == null) {
+            batch = new BatchProcessing(batchId);
+            batchProcessingRepository.persist(batch);
         }
 
-        if (record.getInternalCode() == null || record.getInternalCode().isEmpty()) {
-            throw new FileValidationException(
-                    "InternalCode não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "INTERNAL",
-                            "InternalCode vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
+        // Mark file type as received
+        batch.markFileTypeReceived(fileType);
+
+        // Check if batch is now ready for processing
+        if (batch.hasAllFileTypes()) {
+            LOG.infof("Batch %s has all required file types, marking as ready for processing", batchId);
+            batch.setReadyForProcessing(true);
         }
 
-        if (record.getInternalAmount() == null) {
-            throw new FileValidationException(
-                    "InternalAmount não pode ser nulo na linha " + lineNumber,
-                    createIncident(fileName, "INTERNAL",
-                            "InternalAmount nulo na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
-        }
-
-        if (record.getCorrelationKey() == null || record.getCorrelationKey().isEmpty()) {
-            throw new FileValidationException(
-                    "CorrelationKey não pode ser vazio na linha " + lineNumber,
-                    createIncident(fileName, "INTERNAL",
-                            "CorrelationKey vazio na linha " + lineNumber,
-                            "Validação linha " + lineNumber, correlationId));
-        }
+        batchProcessingRepository.persistAndFlush(batch);
+        LOG.infof("Batch status updated: %s", batch.getProcessingStatus());
     }
 
     /**
-     * Cria um incidente para erro de processamento CSV
+     * Validates the header line. Logs a warning and registers an incident if the header is unexpected.
+     *
+     * @param headerLine     The header line read from the CSV.
+     * @param expectedHeader The expected CSV header.
+     * @param fileName       The file name.
+     * @param fileType       The CSV file type ("EXTERNAL", "ISIN" or "INTERNAL").
+     * @param batchId        The batch identifier.
+     * @return true if header matches the expected header; false otherwise.
      */
-    private ProcessingIncident createIncident(String fileName, String fileType, String message,
-                                              String location, String correlationId) {
-        return monitoringUseCase.createIncident(
-                fileName, fileType, message, location, null, correlationId, "MOVED_TO_ERROR");
+    private boolean validateHeader(String headerLine, String expectedHeader, String fileName, String fileType, String batchId) {
+        if (!headerLine.trim().equalsIgnoreCase(expectedHeader)) {
+            LOG.warnf("%s CSV has unexpected header: %s", fileType, headerLine);
+            monitoringUseCase.logIncident(fileName, fileType, "Invalid header: " + headerLine,
+                    CSV_PROCESSING_LOCATION, null, batchId);
+            return false;
+        }
+        return true;
     }
 }

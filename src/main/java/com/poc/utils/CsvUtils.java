@@ -9,6 +9,8 @@ import java.util.List;
 public class CsvUtils {
     private static final Logger LOG = Logger.getLogger(CsvUtils.class);
 
+    private CsvUtils() {}
+
     /**
      * Extrai uma string de um array de forma segura
      */

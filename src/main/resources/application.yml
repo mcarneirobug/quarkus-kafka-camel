@@ -1,55 +1,83 @@
-#quarkus:
-#  kafka:
-#    bootstrap-servers: localhost:9092
-#  devservices:
-#    enabled: false
-#
-#camel:
-#  context:
-#    name: CsvToKafkaProcessor
-#
-#  # Error handling configuration
-#  error-handler:
-#    dead-letter-channel:
-#      enabled: true
-#      deadLetterUri: "file:./errors"
-#      redeliveryPolicy:
-#        maximumRedeliveries: 3
-#        redeliveryDelay: 1000
-#        backOffMultiplier: 2
-#        useExponentialBackOff: true
-#        logRetryAttempted: true
-#
-#  # Component configurations
-#  component:
-#    kafka:
-#      brokers: ${quarkus.kafka.bootstrap-servers}
-#      client-id: csv-processor-client
-#      value-serializer: org.apache.kafka.common.serialization.StringSerializer
-#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-#
-#  # Main service configuration
-#  service:
-#    enabled: true
-#
-## Application specific configuration
-#app:
-#  input:
-#    directory: "./input"
-#    processed-directory: "./processed"
-#    error-directory: "./errors"
-#    file-patterns:
-#      external: "ESH_EXTERNAL.*\\.csv"
-#      isin: "ESH_ISIN.*\\.csv"
-#      internal: "ESH_INTERNAL.*\\.csv"
-#
-#  output:
-#    kafka:
-#      topic: "aggregated-events"
-#      batch-size: 100
-#
-#  monitoring:
-#    incident-topic: "file-processing-incidents"
-#
-#  # Specify whether to use Camel Kafka component or SmallRye Reactive Messaging
-#  kafka-mode: "camel" # Options: "camel" or "emitter"
+quarkus:
+  devservices:
+    enabled: false
+  native:
+    resources:
+      includes: input/**,processed/**,errors/**,schemas/**
+  liquibase:
+    migrate-at-start: true
+    change-log: db.changelog/master-change-log.yaml
+  datasource:
+    db-kind: postgresql
+    username: csvprocessor
+    password: csvprocessor
+    jdbc:
+      url: jdbc:postgresql://localhost:5432/csvprocessor
+  hibernate-orm:
+    database:
+      generation: validate
+    log:
+      sql: true
+
+kafka:
+  bootstrap:
+    servers: localhost:9092
+
+mp:
+  messaging:
+    outgoing:
+      kafka-events:
+        connector: smallrye-kafka
+        topic: ${app.output.kafka.topic}
+        key:
+          serializer: org.apache.kafka.common.serialization.StringSerializer
+        value:
+          serializer: org.apache.kafka.common.serialization.StringSerializer
+        acks: all
+        delivery:
+          timeout:
+            ms: 30000
+        max:
+          block:
+            ms: 10000
+      kafka-incidents:
+        connector: smallrye-kafka
+        topic: ${app.monitoring.incident-topic}
+        key:
+          serializer: org.apache.kafka.common.serialization.StringSerializer
+        value:
+          serializer: org.apache.kafka.common.serialization.StringSerializer
+        acks: all
+        delivery:
+          timeout:
+            ms: 30000
+        max:
+          block:
+            ms: 10000
+
+app:
+  output:
+    kafka:
+      topic: aggregated-events
+      batch-size: 100
+  monitoring:
+    incident-topic: file-processing-incidents
+  input:
+    directory: ./input
+    processed-directory: ./processed
+    error-directory: ./errors
+    file-patterns:
+      external:
+        regexp: ESH_EXTERNAL.*\.csv
+      isin:
+        regexp: ESH_ISIN.*\.csv
+      internal:
+        regexp: ESH_INTERNAL.*\.csv
+  processing:
+    batch-size: 100
+  kafka-mode: camel
+
+camel:
+  component:
+    kafka:
+      brokers: localhost:9092

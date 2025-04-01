@@ -1,17 +1,35 @@
 package com.poc.usecase;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.poc.exception.BusinessLogicException;
-import com.poc.model.ExternalCsvRecord;
-import com.poc.model.InternalCsvRecord;
-import com.poc.model.IsinCsvRecord;
-import com.poc.model.generated.*;
+
+import com.poc.model.dto.AggregatedEventDto;
+import com.poc.model.dto.ExternalDataDto;
+import com.poc.model.dto.InternalDataDto;
+import com.poc.model.dto.IsinDataDto;
+
+import com.poc.model.entity.AggregatedEvent;
+import com.poc.model.entity.BatchProcessing;
+import com.poc.model.entity.ExternalData;
+import com.poc.model.entity.InternalData;
+import com.poc.model.entity.IsinData;
+
+import com.poc.repository.AggregatedEventRepository;
+import com.poc.repository.BatchProcessingRepository;
+import com.poc.repository.ExternalDataRepository;
+import com.poc.repository.InternalDataRepository;
+import com.poc.repository.IsinDataRepository;
+
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+
+import jakarta.transaction.Transactional;
+
 import org.jboss.logging.Logger;
 
+import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -21,236 +39,155 @@ import java.util.stream.Collectors;
 public class AggregationUseCase {
 
     private static final Logger LOG = Logger.getLogger(AggregationUseCase.class);
-    private static final String ESH_PREFIX = "ESH_";
+
+    private final ExternalDataRepository externalDataRepository;
+    private final IsinDataRepository isinDataRepository;
+    private final InternalDataRepository internalDataRepository;
+    private final AggregatedEventRepository aggregatedEventRepository;
+    private final BatchProcessingRepository batchProcessingRepository;
+    private final ObjectMapper objectMapper;
+    private final MonitoringUseCase monitoringUseCase;
 
     @Inject
-    ObjectMapper objectMapper;
-
-    @Inject
-    MonitoringUseCase monitoringUseCase;
-
-    // Record storage by type
-    private final Map<String, List<ExternalCsvRecord>> externalRecords = new ConcurrentHashMap<>();
-    private final Map<String, List<IsinCsvRecord>> isinRecords = new ConcurrentHashMap<>();
-    private final Map<String, List<InternalCsvRecord>> internalRecords = new ConcurrentHashMap<>();
+    public AggregationUseCase(ExternalDataRepository externalDataRepository, IsinDataRepository isinDataRepository, InternalDataRepository internalDataRepository, AggregatedEventRepository aggregatedEventRepository, BatchProcessingRepository batchProcessingRepository, ObjectMapper objectMapper, MonitoringUseCase monitoringUseCase) {
+        this.externalDataRepository = externalDataRepository;
+        this.isinDataRepository = isinDataRepository;
+        this.internalDataRepository = internalDataRepository;
+        this.aggregatedEventRepository = aggregatedEventRepository;
+        this.batchProcessingRepository = batchProcessingRepository;
+        this.objectMapper = objectMapper;
+        this.monitoringUseCase = monitoringUseCase;
+    }
 
     /**
-     * Standardizes the correlation ID to ensure consistent format
-     * Removes "ESH_" prefix if present
+     * Process a batch by aggregating data from all three sources
      */
-    private String standardizeCorrelationId(String correlationId) {
-        if (correlationId == null) {
-            LOG.warn("Null correlationId provided to standardization method");
-            return null;
+    @Transactional
+    public List<AggregatedEvent> processBatch(String batchId) {
+        LOG.infof("Processing batch aggregation: %s", batchId);
+
+        // Set batch to processing status
+        BatchProcessing batch = batchProcessingRepository.findById(batchId);
+        if (batch == null) {
+            LOG.errorf("Batch %s not found", batchId);
+            throw new IllegalStateException("Batch not found: " + batchId);
         }
 
-        String standardized = correlationId;
-        if (standardized.startsWith(ESH_PREFIX)) {
-            standardized = standardized.substring(ESH_PREFIX.length());
-            LOG.debugf("Standardized correlationId from %s to %s", correlationId, standardized);
+        if (!batch.hasAllFileTypes()) {
+            LOG.warnf("Batch %s does not have all required file types", batchId);
+            throw new IllegalStateException("Batch is missing required file types: " + batchId);
         }
 
-        return standardized;
-    }
+        batchProcessingRepository.updateStatus(batchId, "PROCESSING");
 
-    /**
-     * Stores external file records for later correlation
-     */
-    public void addExternalBatch(List<ExternalCsvRecord> records, String correlationId) {
-        String standardId = standardizeCorrelationId(correlationId);
-        LOG.infof("Adding external records batch: count=%d, correlationId=%s",
-                records.size(), standardId);
-        externalRecords.put(standardId, records);
-    }
+        try {
+            // Get all records for this batch
+            List<ExternalData> externalRecords = externalDataRepository.findByBatchId(batchId);
+            List<IsinData> isinRecords = isinDataRepository.findByBatchId(batchId);
+            List<InternalData> internalRecords = internalDataRepository.findByBatchId(batchId);
 
-    /**
-     * Stores ISIN file records for later correlation
-     */
-    public void addIsinBatch(List<IsinCsvRecord> records, String correlationId) {
-        String standardId = standardizeCorrelationId(correlationId);
-        LOG.infof("Adding ISIN records batch: count=%d, correlationId=%s",
-                records.size(), standardId);
-        isinRecords.put(standardId, records);
-    }
+            LOG.infof("Found %d external, %d ISIN, and %d internal records for batch %s",
+                    externalRecords.size(), isinRecords.size(), internalRecords.size(), batchId);
 
-    /**
-     * Stores internal file records for later correlation
-     */
-    public void addInternalBatch(List<InternalCsvRecord> records, String correlationId) {
-        String standardId = standardizeCorrelationId(correlationId);
-        LOG.infof("Adding internal records batch: count=%d, correlationId=%s",
-                records.size(), standardId);
-        internalRecords.put(standardId, records);
-    }
+            // Create maps by correlation key for faster lookup
+            Map<String, ExternalData> externalMap = externalRecords.stream()
+                    .collect(Collectors.toMap(ExternalData::getCorrelationKey, data -> data, (a, b) -> a));
 
-    /**
-     * Checks if all types of files have been received for a correlationId
-     */
-    public boolean isReadyForAggregation(String correlationId) {
-        String standardId = standardizeCorrelationId(correlationId);
+            Map<String, IsinData> isinMap = isinRecords.stream()
+                    .collect(Collectors.toMap(IsinData::getCorrelationKey, data -> data, (a, b) -> a));
 
-        boolean hasExternal = !externalRecords.isEmpty() && externalRecords.containsKey(standardId);
-        boolean hasIsin = !isinRecords.isEmpty() && isinRecords.containsKey(standardId);
-        boolean hasInternal = !internalRecords.isEmpty() && internalRecords.containsKey(standardId);
+            Map<String, InternalData> internalMap = internalRecords.stream()
+                    .collect(Collectors.toMap(InternalData::getCorrelationKey, data -> data, (a, b) -> a));
 
-        boolean isReady = hasExternal && hasIsin && hasInternal;
+            // Collect all correlation keys
+            Map<String, Boolean> allKeys = new HashMap<>();
+            externalRecords.forEach(r -> allKeys.put(r.getCorrelationKey(), true));
+            isinRecords.forEach(r -> allKeys.put(r.getCorrelationKey(), true));
+            internalRecords.forEach(r -> allKeys.put(r.getCorrelationKey(), true));
 
-        LOG.infof("Checking aggregation for batch %s: external=%s, isin=%s, internal=%s, isReady=%s",
-                standardId, hasExternal, hasIsin, hasInternal, isReady);
+            List<AggregatedEvent> aggregatedEvents = new ArrayList<>();
 
-        return isReady;
-    }
+            // Create aggregated events for each correlation key
+            for (String key : allKeys.keySet()) {
+                try {
+                    AggregatedEventDto dto = new AggregatedEventDto();
+                    dto.setTimestamp(LocalDateTime.now());
+                    dto.setCorrelationId(key);
 
-    /**
-     * Aggregates records based on the correlation key between records
-     */
-    public List<AggregatedEvent> aggregateEvents(String batchCorrelationId) {
-        String standardId = standardizeCorrelationId(batchCorrelationId);
-        LOG.infof("Starting aggregation for batch: %s", standardId);
-
-        if (!isReadyForAggregation(standardId)) {
-            ProcessingIncident incident = monitoringUseCase.createIncident(
-                    "N/A", "AGGREGATION",
-                    "Attempted aggregation without all necessary files",
-                    "AggregationUseCase", null, standardId, "MANUAL_INTERVENTION_REQUIRED");
-
-            throw new BusinessLogicException(
-                    "Cannot aggregate events without all file types", incident);
-        }
-
-        List<ExternalCsvRecord> externalBatch = externalRecords.get(standardId);
-        List<IsinCsvRecord> isinBatch = isinRecords.get(standardId);
-        List<InternalCsvRecord> internalBatch = internalRecords.get(standardId);
-
-        // Map records by correlation key
-        Map<String, ExternalCsvRecord> externalMap = externalBatch.stream()
-                .collect(Collectors.toMap(ExternalCsvRecord::getCorrelationKey, r -> r, (r1, r2) -> r1));
-
-        Map<String, IsinCsvRecord> isinMap = isinBatch.stream()
-                .collect(Collectors.toMap(IsinCsvRecord::getCorrelationKey, r -> r, (r1, r2) -> r1));
-
-        Map<String, InternalCsvRecord> internalMap = internalBatch.stream()
-                .collect(Collectors.toMap(InternalCsvRecord::getCorrelationKey, r -> r, (r1, r2) -> r1));
-
-        // Build unique set of correlation keys
-        Set<String> allKeys = new HashSet<>();
-        allKeys.addAll(externalMap.keySet());
-        allKeys.addAll(isinMap.keySet());
-        allKeys.addAll(internalMap.keySet());
-
-        List<Exception> errors = new ArrayList<>();
-        List<AggregatedEvent> aggregatedEvents = new ArrayList<>();
-
-        for (String key : allKeys) {
-            try {
-                AggregatedEvent event = new AggregatedEvent();
-                event.setEventId(UUID.randomUUID().toString());
-                event.setTimestamp(new Date());
-                event.setCorrelationId(key);
-
-                // Processing information
-                ProcessingInfo processingInfo = new ProcessingInfo();
-                processingInfo.setProcessedAt(new Date());
-                processingInfo.setSourceBatch(standardId);
-
-                // Determine if complete or partial
-                boolean hasAllData = externalMap.containsKey(key) &&
-                        isinMap.containsKey(key) &&
-                        internalMap.containsKey(key);
-
-                processingInfo.setStatus(hasAllData ?
-                        ProcessingInfo.Status.COMPLETE :
-                        ProcessingInfo.Status.PARTIAL);
-                event.setProcessingInfo(processingInfo);
-
-                // Add external data if available
-                if (externalMap.containsKey(key)) {
-                    ExternalCsvRecord externalRecord = externalMap.get(key);
-                    ExternalData externalData = new ExternalData();
-                    externalData.setExternalId(externalRecord.getExternalId());
-                    externalData.setExternalName(externalRecord.getExternalName());
-                    externalData.setExternalValue(externalRecord.getExternalValue().doubleValue());
-                    event.setExternalData(externalData);
-                }
-
-                // Add ISIN data if available
-                if (isinMap.containsKey(key)) {
-                    IsinCsvRecord isinRecord = isinMap.get(key);
-                    IsinData isinData = new IsinData();
-                    isinData.setIsin(isinRecord.getIsin());
-                    isinData.setIsinDescription(isinRecord.getIsinDescription());
-                    isinData.setIsinCategory(isinRecord.getIsinCategory());
-                    event.setIsinData(isinData);
-                }
-
-                // Add internal data if available
-                if (internalMap.containsKey(key)) {
-                    InternalCsvRecord internalRecord = internalMap.get(key);
-                    InternalData internalData = new InternalData();
-                    internalData.setInternalId(internalRecord.getInternalId());
-                    internalData.setInternalCode(internalRecord.getInternalCode());
-                    internalData.setInternalAmount(internalRecord.getInternalAmount().doubleValue());
-                    event.setInternalData(internalData);
-                }
-
-                aggregatedEvents.add(event);
-            } catch (Exception e) {
-                LOG.errorf("Error aggregating event for key %s: %s", key, e.getMessage());
-                ProcessingIncident incident = monitoringUseCase.createIncident(
-                        "N/A", "AGGREGATION",
-                        "Error aggregating event for key: " + key,
-                        "AggregationUseCase", e, standardId, "MANUAL_INTERVENTION_REQUIRED");
-
-                monitoringUseCase.registerIncident(incident);
-                errors.add(e);
-            }
-        }
-
-        // Check for errors
-        if (!errors.isEmpty()) {
-            // If there were errors, create an incident and don't return anything
-            ProcessingIncident incident = monitoringUseCase.createIncident(
-                    "N/A", "AGGREGATION",
-                    "Errors during data aggregation. Total errors: " + errors.size(),
-                    "AggregationUseCase", errors.get(0), standardId, "MANUAL_INTERVENTION_REQUIRED");
-
-            throw new BusinessLogicException(
-                    "Errors during data aggregation", errors.get(0), incident);
-        }
-
-        LOG.infof("Aggregation complete: batch=%s, events=%d", standardId, aggregatedEvents.size());
-
-        // Clean up batch data from memory after aggregation
-        cleanupBatch(standardId);
-
-        return aggregatedEvents;
-    }
-
-    /**
-     * Cleans up batch data from memory after processing
-     */
-    private void cleanupBatch(String batchCorrelationId) {
-        String standardId = standardizeCorrelationId(batchCorrelationId);
-        externalRecords.remove(standardId);
-        isinRecords.remove(standardId);
-        internalRecords.remove(standardId);
-        LOG.infof("Batch data %s removed from memory", standardId);
-    }
-
-    /**
-     * Serializes aggregated events to JSON
-     */
-    public List<String> serializeEvents(List<AggregatedEvent> events) {
-        return events.stream()
-                .map(event -> {
-                    try {
-                        return objectMapper.writeValueAsString(event);
-                    } catch (Exception e) {
-                        LOG.errorf("Error serializing event %s: %s", event.getEventId(), e.getMessage());
-                        return null;
+                    // Add data from each source if available
+                    if (externalMap.containsKey(key)) {
+                        ExternalData externalData = externalMap.get(key);
+                        ExternalDataDto externalDto = new ExternalDataDto();
+                        externalDto.setExternalId(externalData.getExternalId());
+                        externalDto.setExternalName(externalData.getExternalName());
+                        externalDto.setExternalValue(externalData.getExternalValue().doubleValue());
+                        dto.setExternalData(externalDto);
                     }
-                })
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+
+                    if (isinMap.containsKey(key)) {
+                        IsinData isinData = isinMap.get(key);
+                        IsinDataDto isinDto = new IsinDataDto();
+                        isinDto.setIsin(isinData.getIsin());
+                        isinDto.setIsinDescription(isinData.getIsinDescription());
+                        isinDto.setIsinCategory(isinData.getIsinCategory());
+                        dto.setIsinData(isinDto);
+                    }
+
+                    if (internalMap.containsKey(key)) {
+                        InternalData internalData = internalMap.get(key);
+                        InternalDataDto internalDto = new InternalDataDto();
+                        internalDto.setInternalId(internalData.getInternalId());
+                        internalDto.setInternalCode(internalData.getInternalCode());
+                        internalDto.setInternalAmount(internalData.getInternalAmount().doubleValue());
+                        dto.setInternalData(internalDto);
+                    }
+
+                    // Create entity and serialize DTO to JSON
+                    AggregatedEvent event = new AggregatedEvent();
+                    event.setBatchId(batchId);
+                    event.setCorrelationKey(key);
+                    event.setEventJson(objectMapper.writeValueAsString(dto));
+
+                    aggregatedEvents.add(event);
+                } catch (JsonProcessingException e) {
+                    LOG.errorf("Error serializing event for key %s: %s", key, e.getMessage());
+                    monitoringUseCase.logIncident("N/A", "AGGREGATION",
+                            "Error creating event: " + e.getMessage(),
+                            "JSON serialization", e, batchId);
+                }
+            }
+
+            // Save aggregated events
+            if (!aggregatedEvents.isEmpty()) {
+                aggregatedEventRepository.saveAll(aggregatedEvents);
+                LOG.infof("Created %d aggregated events for batch %s", aggregatedEvents.size(), batchId);
+            }
+
+            // Mark all records as processed
+            externalDataRepository.markAllAsProcessed(batchId);
+            isinDataRepository.markAllAsProcessed(batchId);
+            internalDataRepository.markAllAsProcessed(batchId);
+
+            // Update batch status
+            batchProcessingRepository.updateStatus(batchId, "AGGREGATED");
+
+            LOG.infof("Batch %s processed successfully", batchId);
+            return aggregatedEvents;
+        } catch (Exception e) {
+            LOG.errorf("Error processing batch %s: %s", batchId, e.getMessage());
+            batchProcessingRepository.updateStatus(batchId, "ERROR");
+            monitoringUseCase.logIncident("N/A", "AGGREGATION",
+                    "Error processing batch: " + e.getMessage(),
+                    "AggregationUseCase", e, batchId);
+            throw e;
+        }
+    }
+
+    /**
+     * Checks if a batch is complete by having data for all three file types
+     */
+    public boolean isBatchComplete(String batchId) {
+        BatchProcessing batch = batchProcessingRepository.findById(batchId);
+        return batch != null && batch.hasAllFileTypes();
     }
 }
